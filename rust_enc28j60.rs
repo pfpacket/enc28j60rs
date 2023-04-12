@@ -1,40 +1,91 @@
 // SPDX-License-Identifier: GPL-2.0
 
-use kernel::{module_platform_driver, of, platform, prelude::*, spi};
+use kernel::{
+    device::RawDevice,
+    driver,
+    types::ForeignOwnable,
+    module_spi_driver,
+    of,
+    prelude::*,
+    spi,
+    sync::smutex::Mutex,
+};
+use core::sync::atomic::{AtomicU8, Ordering};
 
-module_platform_driver! {
-    type: EncAdapter,
-    name: "rust_enc28j60",
-    license: "GPL",
+mod enc28j60;
+
+const to_dev: fn(&dyn RawDevice) -> kernel::device::Device = kernel::device::Device::from_dev;
+
+struct EncInner {
+    bank: AtomicU8,
+    spidev: spi::Device,
 }
 
-struct EncAdapter;
+impl EncInner {
+    fn read<T: enc28j60::Register>(&mut self, reg: T, command: enc28j60::Command) -> Result<T::Size> {
+        let bank = reg.bank();
+        if self.bank.load(Ordering::Relaxed) != bank as _ {
+            enc28j60::set_bank(&self.spidev, bank)?;
+            self.bank.store(bank as _, Ordering::Relaxed);
+        }
 
-impl platform::Driver for EncAdapter {
+        reg.read(&self.spidev, command)
+    }
+
+    fn soft_reset(&self) -> Result {
+        self.spidev.write(&[enc28j60::Command::SRC as u8])
+    }
+}
+
+struct EncAdapter {
+    inner: Mutex<EncInner>,
+}
+
+impl driver::DeviceRemoval for EncAdapter {
+    fn device_remove(&self) {}
+}
+
+impl EncAdapter {
+    fn try_new(spidev: spi::Device) -> Result<Self> {
+        let mut enc = EncInner {
+            bank: AtomicU8::new(enc28j60::Bank::Bank0 as _),
+            spidev,
+        };
+
+        let revision = enc.read(enc28j60::EREVID, enc28j60::Command::RCR)?;
+        dev_info!(to_dev(&enc.spidev), "ENC28J60 EREVID = {}\n", revision);
+        if revision == 0 || revision == 0xff {
+            return Err(EINVAL);
+        }
+
+        enc.soft_reset()?;
+        Ok(EncAdapter { inner: Mutex::new(enc) })
+    }
+}
+
+impl spi::Driver for EncAdapter {
     kernel::define_of_id_table! {(), [
         (of::DeviceId::Compatible(b"microchip,enc28j60"), None),
     ]}
 
-    fn probe(_dev: &mut platform::Device, _id_info: Option<&Self::IdInfo>) -> Result<> {
-        pr_err!("enc28j60 rust driver platform probe\n");
-        Ok(())
+    type Data = Box<EncAdapter>;
+
+    fn probe(spidev: spi::Device, _id_info: Option<&Self::IdInfo>) -> Result<Self::Data> {
+        Ok(Box::try_new(EncAdapter::try_new(spidev)?)?)
+    }
+
+    fn remove(_spidev: spi::Device, _data: &Self::Data) {
+        pr_info!("rust spi driver remove\n");
+    }
+
+    fn shutdown(_spidev: spi::Device, _data: <Self::Data as ForeignOwnable>::Borrowed<'_>) {
+        pr_info!("rust spi driver shutdown\n");
     }
 }
 
-//impl spi::SpiMethods for EncAdapter {
-//    // Let's say you only want a probe and remove method, no shutdown.
-//    kernel::declare_spi_methods!(probe, remove);
-//
-//    /// Define your probe and remove methods. If you don't, default implementations
-//    /// will be used instead. These default implementations do *not* correspond to the
-//    /// kernel's default implementations! If you wish to use the kernel's default
-//    /// SPI functions implementations, do not declare them using the `declare_spi_methods`
-//    /// macro. For example, here our driver will use the kernel's `shutdown` method.
-//    fn probe(spi_dev: spi::SpiDevice) -> Result {
-//        pr_info!("enc28j60 rust driver spi probe\n");
-//
-//        Ok(())
-//    }
-//
-//    fn remove(spi_dev: spi::SpiDevice) {}
-//}
+module_spi_driver! {
+    type: EncAdapter,
+    name: "rust_enc28j60",
+    description: "ENC28J60 ethernet driver written in Rust",
+    license: "GPL",
+}
