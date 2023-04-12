@@ -1,9 +1,6 @@
 #![allow(dead_code)]
 
-use kernel::{
-    prelude::*,
-    spi
-};
+use kernel::{prelude::*, spi};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Bank {
@@ -26,42 +23,78 @@ pub(crate) struct ControlRegisterU16 {
     high: ControlRegisterU8,
 }
 
-pub(crate) const EIE: ControlRegisterU8 = ControlRegisterU8 { bank: Bank::Common, addr: 0x1b };
-pub(crate) const EIR: ControlRegisterU8 = ControlRegisterU8 { bank: Bank::Common, addr: 0x1c };
-pub(crate) const ESTAT: ControlRegisterU8 = ControlRegisterU8 { bank: Bank::Common, addr: 0x1d };
-pub(crate) const ECON2: ControlRegisterU8 = ControlRegisterU8 { bank: Bank::Common, addr: 0x1e };
-pub(crate) const ECON1: ControlRegisterU8 = ControlRegisterU8 { bank: Bank::Common, addr: 0x1f };
+pub(crate) const EIE: ControlRegisterU8 = ControlRegisterU8 {
+    bank: Bank::Common,
+    addr: 0x1b,
+};
+pub(crate) const EIR: ControlRegisterU8 = ControlRegisterU8 {
+    bank: Bank::Common,
+    addr: 0x1c,
+};
+pub(crate) const ESTAT: ControlRegisterU8 = ControlRegisterU8 {
+    bank: Bank::Common,
+    addr: 0x1d,
+};
+pub(crate) const ECON2: ControlRegisterU8 = ControlRegisterU8 {
+    bank: Bank::Common,
+    addr: 0x1e,
+};
+pub(crate) const ECON1: ControlRegisterU8 = ControlRegisterU8 {
+    bank: Bank::Common,
+    addr: 0x1f,
+};
 #[allow(non_snake_case)]
 mod ECON1 {
     pub(crate) const BSEL0: u8 = 0b00000001;
     pub(crate) const BSEL1: u8 = 0b00000010;
 }
 
-pub(crate) const ERDPTL: ControlRegisterU8 = ControlRegisterU8 { bank: Bank::Bank0, addr: 0x00 };
-pub(crate) const ERDPTH: ControlRegisterU8 = ControlRegisterU8 { bank: Bank::Bank0, addr: 0x01 };
-pub(crate) const ERDPT: ControlRegisterU16 = ControlRegisterU16 { low: ERDPTL, high: ERDPTH };
+pub(crate) const ERDPTL: ControlRegisterU8 = ControlRegisterU8 {
+    bank: Bank::Bank0,
+    addr: 0x00,
+};
+pub(crate) const ERDPTH: ControlRegisterU8 = ControlRegisterU8 {
+    bank: Bank::Bank0,
+    addr: 0x01,
+};
+pub(crate) const ERDPT: ControlRegisterU16 = ControlRegisterU16 {
+    low: ERDPTL,
+    high: ERDPTH,
+};
 
-pub(crate) const EREVID: ControlRegisterU8 = ControlRegisterU8 { bank: Bank::Bank3, addr: 0x12 };
+pub(crate) const EREVID: ControlRegisterU8 = ControlRegisterU8 {
+    bank: Bank::Bank3,
+    addr: 0x12,
+};
 
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum Command {
-    RCR = 0x0,
-    RBM = 0x3a,
-    WCR = 0x2,
-    WBM = 0x7a,
-    BFS = 0x4,
-    BFC = 0x5,
-    SRC = 0xff,
+    Rcr = 0x0,
+    Rbm = 0x3a,
+    Wcr = 0x2,
+    Wbm = 0x7a,
+    Bfs = 0x4,
+    Bfc = 0x5,
+    Src = 0xff,
 }
 
-pub(crate) fn write_u8(spidev: &spi::Device, command: Command, reg: ControlRegisterU8, data: u8) -> Result {
+pub(crate) fn write_u8(
+    spidev: &spi::Device,
+    command: Command,
+    reg: ControlRegisterU8,
+    data: u8,
+) -> Result {
     let tx_buf = [(command as u8) << 5 | reg.addr, data];
 
     spidev.write(&tx_buf)
 }
 
-pub(crate) fn read_u8(spidev: &spi::Device, command: Command, reg: ControlRegisterU8) -> Result<u8> {
+pub(crate) fn read_u8(
+    spidev: &spi::Device,
+    command: Command,
+    reg: ControlRegisterU8,
+) -> Result<u8> {
     let tx_buf = [(command as u8) << 5 | reg.addr];
     let mut rx_buf = [0u8; 1];
 
@@ -74,8 +107,8 @@ pub(crate) fn set_bank(spidev: &spi::Device, bank: Bank) -> Result {
     if bank == Bank::Common {
         Ok(())
     } else {
-        write_u8(spidev, Command::BFC, ECON1, ECON1::BSEL1 | ECON1::BSEL0)?;
-        write_u8(spidev, Command::BFS, ECON1, bank as u8)
+        write_u8(spidev, Command::Bfc, ECON1, ECON1::BSEL1 | ECON1::BSEL0)?;
+        write_u8(spidev, Command::Bfs, ECON1, bank as u8)
     }
 }
 
