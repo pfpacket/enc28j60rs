@@ -14,9 +14,9 @@ use {
     },
 };
 
-mod enc28j60;
-use enc28j60::register::*;
-use enc28j60::*;
+mod enc28j60_hw;
+use enc28j60_hw::register::*;
+use enc28j60_hw::*;
 
 #[allow(non_upper_case_globals)]
 const from_dev: fn(&dyn RawDevice) -> kernel::device::Device = kernel::device::Device::from_dev;
