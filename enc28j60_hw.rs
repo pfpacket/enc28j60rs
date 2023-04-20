@@ -331,7 +331,16 @@ pub(crate) mod register {
     pub(crate) const PHHID1: PhyRegister = PhyRegister { addr: 0x02 };
     pub(crate) const PHHID2: PhyRegister = PhyRegister { addr: 0x03 };
     pub(crate) const PHCON2: PhyRegister = PhyRegister { addr: 0x10 };
+
     pub(crate) const PHSTAT2: PhyRegister = PhyRegister { addr: 0x11 };
+    pub(crate) mod phstat2 {
+        pub(crate) const TXSTAT: u16 = 1 << 13;
+        pub(crate) const RXSTAT: u16 = 1 << 12;
+        pub(crate) const COLSTAT: u16 = 1 << 11;
+        pub(crate) const LSTAT: u16 = 1 << 10;
+        pub(crate) const DPXSTAT: u16 = 1 << 9;
+        pub(crate) const PLRITY: u16 = 1 << 5;
+    }
 
     pub(crate) const PHIE: PhyRegister = PhyRegister { addr: 0x12 };
     pub(crate) mod phie {

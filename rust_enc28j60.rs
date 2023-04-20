@@ -34,6 +34,7 @@ struct Enc28j60Device {
     spidev: spi::Device,
     netdev_reg: Option<net::Registration<Enc28j60Adapter>>,
     irq: Option<irq::ThreadedRegistration<Enc28j60IrqHandler>>,
+    hw_enabled: bool,
     next_packet_ptr: u16,
 }
 
@@ -100,6 +101,21 @@ impl Enc28j60Device {
     }
 
     fn check_link_status(&mut self) -> Result {
+        let phstat2 = self.read_phy(PHSTAT2)?;
+        let duplex = phstat2 & phstat2::DPXSTAT > 0;
+
+        if phstat2 & phstat2::LSTAT > 0 {
+            self.netdev().netif_carrier_on();
+            dev_info!(
+                from_dev(&self.spidev),
+                "link up ({})\n",
+                if duplex { "Full Duplex" } else { "Half Duplex" }
+            );
+        } else {
+            dev_info!(from_dev(&self.spidev), "link down\n");
+            self.netdev().netif_carrier_off();
+        }
+
         Ok(())
     }
 
@@ -120,6 +136,15 @@ impl Enc28j60Device {
         // Start RX
         self.write(ECON1, Command::Bfs, econ1::RXEN)?;
 
+        self.hw_enabled = true;
+
+        Ok(())
+    }
+
+    fn disable_hardware(&mut self) -> Result {
+        self.write(EIE, Command::Wcr, 0x0)?;
+        self.write(ECON1, Command::Bfc, econ1::RXEN)?;
+        self.hw_enabled = false;
         Ok(())
     }
 
@@ -251,8 +276,8 @@ impl driver::DeviceRemoval for Enc28j60Adapter {
                 core::mem::replace(&mut inner.irq, None),
             )
         };
-        drop(netdev_reg);
         drop(irq);
+        drop(netdev_reg);
     }
 }
 
@@ -263,6 +288,7 @@ impl Enc28j60Adapter {
             spidev,
             netdev_reg: None,
             irq: None,
+            hw_enabled: false,
             next_packet_ptr: 0,
         };
 
@@ -291,16 +317,15 @@ impl net::DeviceOperations for Enc28j60Adapter {
         Ok(())
     }
 
+    // Don't use `netdev_reg` as it might be None
     fn stop(dev: &net::Device, adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
         let mut inner = adapter.inner.lock();
         dev_info!(from_dev(&inner.spidev), "netdev::stop called\n");
 
-        inner.write(EIE, Command::Bfc, eie::INTIE | eie::PKTIE)?;
-        inner.write(ECON1, Command::Bfc, econ1::RXEN)?;
+        inner.disable_hardware()?;
 
-        let netdev = inner.netdev();
-        netdev.netif_stop_queue();
-        netdev.netif_carrier_off();
+        dev.netif_stop_queue();
+
         Ok(())
     }
 
@@ -330,10 +355,26 @@ impl irq::ThreadedHandler for Enc28j60IrqHandler {
 }
 
 kernel::impl_self_work_adapter!(Enc28j60IrqHandler, work, |irq_handler| {
-    pr_info!("enc28j60 workqueue callback\n");
+    let _ = move || -> Result {
+        let mut inner = irq_handler.adapter.inner.lock();
 
-    let inner = irq_handler.adapter.inner.lock();
-    dev_info!(from_dev(&inner.spidev), "enc28j60 workqueue callback\n");
+        // Stop further interrupts
+        inner.write(EIE, Command::Bfc, eie::INTIE)?;
+
+        let eir = inner.read(EIR, Command::Rcr)?;
+
+        dev_info!(from_dev(&inner.spidev), "IRQ EIR={:02x}\n", eir);
+
+        // Clear IRQ flags
+        inner.write(
+            EIR,
+            Command::Bfc,
+            eir::DMAIF | eir::LINKIF | eir::TXIF | eir::TXERIF | eir::RXERIF | eir::PKTIF,
+        )?;
+
+        // Enable interrupts
+        inner.write(EIE, Command::Bfs, eie::INTIE)
+    }();
 });
 
 type Enc28j60IdInfo = ();
