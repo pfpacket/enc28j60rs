@@ -55,6 +55,11 @@ impl Enc28j60Device {
         }
     }
 
+    fn netdev(&self) -> ARef<net::Device> {
+        // netdev_reg is not None until `spi::Driver` gets removed
+        self.netdev_reg.as_ref().unwrap().dev_get()
+    }
+
     fn wait_for_ready<T: Register>(
         &mut self,
         reg: T,
@@ -214,29 +219,22 @@ impl Enc28j60Device {
     }
 
     fn set_random_macaddr(&mut self) -> Result {
-        if let Some(ref netdev_reg) = self.netdev_reg {
-            (*netdev_reg.dev_get()).eth_hw_addr_random();
-            self.set_hw_macaddr()?;
-        }
-        Ok(())
+        self.netdev().eth_hw_addr_random();
+        self.set_hw_macaddr()
     }
 
     fn set_hw_macaddr(&mut self) -> Result {
-        if let Some(ref netdev_reg) = self.netdev_reg {
-            let netdev = netdev_reg.dev_get();
-            let dev_addr = netdev.device_address();
+        let netdev = self.netdev();
+        let dev_addr = netdev.device_address();
 
-            self.write(MAADR6, Command::Wcr, dev_addr[0])?;
-            self.write(MAADR5, Command::Wcr, dev_addr[1])?;
-            self.write(MAADR4, Command::Wcr, dev_addr[2])?;
-            self.write(MAADR3, Command::Wcr, dev_addr[3])?;
-            self.write(MAADR2, Command::Wcr, dev_addr[4])?;
-            self.write(MAADR1, Command::Wcr, dev_addr[5])?;
+        dev_info!(from_dev(&self.spidev), "Set MAC address: {:?}\n", dev_addr);
 
-            dev_info!(from_dev(&self.spidev), "Set MAC address: {:?}\n", dev_addr);
-        }
-
-        Ok(())
+        self.write(MAADR6, Command::Wcr, dev_addr[0])?;
+        self.write(MAADR5, Command::Wcr, dev_addr[1])?;
+        self.write(MAADR4, Command::Wcr, dev_addr[2])?;
+        self.write(MAADR3, Command::Wcr, dev_addr[3])?;
+        self.write(MAADR2, Command::Wcr, dev_addr[4])?;
+        self.write(MAADR1, Command::Wcr, dev_addr[5])
     }
 }
 
@@ -280,44 +278,36 @@ impl Enc28j60Adapter {
 impl net::DeviceOperations for Enc28j60Adapter {
     type Data = Arc<Enc28j60Adapter>;
 
-    fn open(dev: &net::Device, data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
-        let mut adapter = data.inner.lock();
-        dev_info!(from_dev(&adapter.spidev), "netdev::open called\n");
+    fn open(dev: &net::Device, adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
+        let mut inner = adapter.inner.lock();
+        dev_info!(from_dev(&inner.spidev), "netdev::open called\n");
 
-        adapter.init_hardware()?;
-        adapter.enable_hardware()?;
-        adapter.check_link_status()?;
+        inner.init_hardware()?;
+        inner.enable_hardware()?;
+        inner.check_link_status()?;
 
-        adapter
-            .netdev_reg
-            .as_ref()
-            .unwrap()
-            .dev_get()
-            .netif_start_queue();
+        inner.netdev().netif_start_queue();
 
         Ok(())
     }
 
-    fn stop(dev: &net::Device, data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
-        let mut adapter = data.inner.lock();
-        dev_info!(from_dev(&adapter.spidev), "netdev::stop called\n");
+    fn stop(dev: &net::Device, adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
+        let mut inner = adapter.inner.lock();
+        dev_info!(from_dev(&inner.spidev), "netdev::stop called\n");
 
-        adapter.write(EIE, Command::Bfc, eie::INTIE | eie::PKTIE)?;
-        adapter.write(ECON1, Command::Bfc, econ1::RXEN)?;
+        inner.write(EIE, Command::Bfc, eie::INTIE | eie::PKTIE)?;
+        inner.write(ECON1, Command::Bfc, econ1::RXEN)?;
 
-        if let Some(netdev_reg) = adapter.netdev_reg.as_ref() {
-            let netdev = netdev_reg.dev_get();
-            netdev.netif_stop_queue();
-            netdev.netif_carrier_off();
-        }
-
+        let netdev = inner.netdev();
+        netdev.netif_stop_queue();
+        netdev.netif_carrier_off();
         Ok(())
     }
 
     fn start_xmit(
         skb: &net::SkBuff,
         dev: &net::Device,
-        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>,
     ) -> net::NetdevTx {
         //pr_info!("netdev::start_xmit called\n");
         net::NetdevTx::Busy
