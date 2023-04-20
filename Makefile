@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0
+
 KDIR ?= /home/devm33/pkgbuild/linux-rpi-rust-git/src/linux/
 ARCH=arm64
 
