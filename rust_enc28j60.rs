@@ -8,8 +8,9 @@ use {
         driver, irq, module_spi_driver, net, of,
         prelude::*,
         spi,
-        sync::{smutex::Mutex, Arc},
+        sync::{smutex::Mutex, Arc, UniqueArc},
         types::ForeignOwnable,
+        workqueue,
     },
 };
 
@@ -32,7 +33,7 @@ struct EncInner {
     bank: Bank,
     spidev: spi::Device,
     netdev_reg: Option<net::Registration<EncAdapter>>,
-    irq: Option<irq::ThreadedRegistration<EncAdapter>>,
+    irq: Option<irq::ThreadedRegistration<EncIrqHandler>>,
     next_packet_ptr: u16,
 }
 
@@ -221,17 +222,15 @@ struct EncAdapter {
 
 impl driver::DeviceRemoval for EncAdapter {
     fn device_remove(&self) {
-        let (irq, netdev_reg) = {
+        let (netdev_reg, irq) = {
             let mut inner = self.inner.lock();
-            dev_info!(from_dev(&inner.spidev), "device removal\n");
             (
-                core::mem::replace(&mut inner.irq, None),
                 core::mem::replace(&mut inner.netdev_reg, None),
+                core::mem::replace(&mut inner.irq, None),
             )
         };
-
-        drop(irq);
         drop(netdev_reg);
+        drop(irq);
     }
 }
 
@@ -297,14 +296,27 @@ impl net::DeviceOperations for EncAdapter {
     }
 }
 
-impl irq::ThreadedHandler for EncAdapter {
-    type Data = Arc<EncAdapter>;
+struct EncIrqHandler {
+    work: workqueue::Work,
+    enc: Arc<EncAdapter>,
+}
+
+impl irq::ThreadedHandler for EncIrqHandler {
+    type Data = Arc<EncIrqHandler>;
 
     fn handle_threaded_irq(data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> irq::Return {
-        dev_info!(from_dev(&data.inner.lock().spidev), "IRQ handler called\n");
+        workqueue::system().enqueue(data.into());
+
         irq::Return::Handled
     }
 }
+
+kernel::impl_self_work_adapter!(EncIrqHandler, work, |irq_handler| {
+    pr_info!("enc28j60 workqueue callback\n");
+
+    let inner = irq_handler.enc.inner.lock();
+    dev_info!(from_dev(&inner.spidev), "enc28j60 workqueue callback\n");
+});
 
 type EncIdInfo = ();
 
@@ -334,20 +346,27 @@ impl spi::Driver for EncAdapter {
         );
 
         let irq = spidev.get_irq();
+        let netdev_reg = net::Registration::try_new(&spidev)?;
+        let netdev = netdev_reg.dev_get();
+
         let enc = Arc::try_new(EncAdapter::try_new(spidev)?)?;
+
+        let irq_handler = UniqueArc::try_new(EncIrqHandler {
+            // SAFETY: `work` is initialized immediately in the next statement
+            work: unsafe { workqueue::Work::new() },
+            enc: enc.clone(),
+        })?;
+        kernel::init_work_item!(&irq_handler);
 
         {
             let mut inner = enc.inner.lock();
 
-            let netdev_reg = net::Registration::try_new(&inner.spidev)?;
-            let netdev = netdev_reg.dev_get();
             inner.netdev_reg = Some(netdev_reg);
-
             inner.set_random_macaddr()?;
 
             inner.irq = Some(irq::ThreadedRegistration::try_new(
                 irq as _,
-                enc.clone(),
+                irq_handler.into(),
                 irq::flags::SHARED,
                 fmt!("enc28j60_{irq}"),
             )?);

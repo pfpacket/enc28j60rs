@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #![allow(dead_code)]
 
 use core::ops::{BitAnd, BitOr};
