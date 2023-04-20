@@ -18,9 +18,6 @@ mod enc28j60_hw;
 use enc28j60_hw::register::*;
 use enc28j60_hw::*;
 
-#[allow(non_upper_case_globals)]
-const from_dev: fn(&dyn RawDevice) -> kernel::device::Device = kernel::device::Device::from_dev;
-
 type BufferRange = core::ops::RangeInclusive<u16>;
 const RXFIFO_INIT: BufferRange = 0x0000..=0x19ff;
 const TXFIFO_INIT: BufferRange = 0x1a00..=0x1fff;
@@ -29,15 +26,18 @@ const ENC28J60_LAMPS_MODE: u16 = 0x3476;
 
 const ETH_MAX_FRAME_LEN: u16 = 1518;
 
-struct EncInner {
+#[allow(non_upper_case_globals)]
+const from_dev: fn(&dyn RawDevice) -> kernel::device::Device = kernel::device::Device::from_dev;
+
+struct Enc28j60Device {
     bank: Bank,
     spidev: spi::Device,
-    netdev_reg: Option<net::Registration<EncAdapter>>,
-    irq: Option<irq::ThreadedRegistration<EncIrqHandler>>,
+    netdev_reg: Option<net::Registration<Enc28j60Adapter>>,
+    irq: Option<irq::ThreadedRegistration<Enc28j60IrqHandler>>,
     next_packet_ptr: u16,
 }
 
-impl EncInner {
+impl Enc28j60Device {
     fn read<T: Register>(&mut self, reg: T, command: Command) -> Result<T::Size> {
         self.switch_bank(reg.bank())?;
         reg.read(&self.spidev, command)
@@ -92,6 +92,30 @@ impl EncInner {
         self.write(MIWR, Command::Wcr, data)?;
 
         self.wait_for_ready(MISTAT, mistat::BUSY, 0)
+    }
+
+    fn check_link_status(&mut self) -> Result {
+        Ok(())
+    }
+
+    fn enable_hardware(&mut self) -> Result {
+        self.write_phy(PHIE, phie::PGEIE | phie::PLNKIE)?;
+
+        self.write(
+            EIR,
+            Command::Bfc,
+            eir::DMAIF | eir::LINKIF | eir::TXIF | eir::TXERIF | eir::RXERIF | eir::PKTIF,
+        )?;
+        self.write(
+            EIE,
+            Command::Wcr,
+            eie::INTIE | eie::PKTIE | eie::LINKIE | eie::TXIE | eie::TXERIE | eie::RXERIE,
+        )?;
+
+        // Start RX
+        self.write(ECON1, Command::Bfs, econ1::RXEN)?;
+
+        Ok(())
     }
 
     fn init_hardware(&mut self) -> Result {
@@ -216,11 +240,11 @@ impl EncInner {
     }
 }
 
-struct EncAdapter {
-    inner: Mutex<EncInner>,
+struct Enc28j60Adapter {
+    inner: Mutex<Enc28j60Device>,
 }
 
-impl driver::DeviceRemoval for EncAdapter {
+impl driver::DeviceRemoval for Enc28j60Adapter {
     fn device_remove(&self) {
         let (netdev_reg, irq) = {
             let mut inner = self.inner.lock();
@@ -234,9 +258,9 @@ impl driver::DeviceRemoval for EncAdapter {
     }
 }
 
-impl EncAdapter {
+impl Enc28j60Adapter {
     fn try_new(spidev: spi::Device) -> Result<Self> {
-        let mut enc = EncInner {
+        let mut adapter = Enc28j60Device {
             bank: Bank::Bank0,
             spidev,
             netdev_reg: None,
@@ -244,40 +268,44 @@ impl EncAdapter {
             next_packet_ptr: 0,
         };
 
-        enc.init_hardware()?;
+        adapter.init_hardware()?;
 
-        Ok(EncAdapter {
-            inner: Mutex::new(enc),
+        Ok(Enc28j60Adapter {
+            inner: Mutex::new(adapter),
         })
     }
 }
 
 #[vtable]
-impl net::DeviceOperations for EncAdapter {
-    type Data = Arc<EncAdapter>;
+impl net::DeviceOperations for Enc28j60Adapter {
+    type Data = Arc<Enc28j60Adapter>;
 
     fn open(dev: &net::Device, data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
-        let mut enc = data.inner.lock();
-        dev_info!(from_dev(&enc.spidev), "netdev::open called\n");
+        let mut adapter = data.inner.lock();
+        dev_info!(from_dev(&adapter.spidev), "netdev::open called\n");
 
-        // Enable IRQ
-        enc.write(EIE, Command::Bfs, eie::INTIE | eie::PKTIE)?;
+        adapter.init_hardware()?;
+        adapter.enable_hardware()?;
+        adapter.check_link_status()?;
 
-        // Start RX
-        enc.write(ECON1, Command::Bfs, econ1::RXEN)
+        adapter
+            .netdev_reg
+            .as_ref()
+            .unwrap()
+            .dev_get()
+            .netif_start_queue();
+
+        Ok(())
     }
 
     fn stop(dev: &net::Device, data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
-        let mut enc = data.inner.lock();
-        dev_info!(from_dev(&enc.spidev), "netdev::stop called\n");
+        let mut adapter = data.inner.lock();
+        dev_info!(from_dev(&adapter.spidev), "netdev::stop called\n");
 
-        // Enable IRQ
-        enc.write(EIE, Command::Bfc, eie::INTIE | eie::PKTIE)?;
+        adapter.write(EIE, Command::Bfc, eie::INTIE | eie::PKTIE)?;
+        adapter.write(ECON1, Command::Bfc, econ1::RXEN)?;
 
-        // Start RX
-        enc.write(ECON1, Command::Bfc, econ1::RXEN)?;
-
-        if let Some(netdev_reg) = enc.netdev_reg.as_ref() {
+        if let Some(netdev_reg) = adapter.netdev_reg.as_ref() {
             let netdev = netdev_reg.dev_get();
             netdev.netif_stop_queue();
             netdev.netif_carrier_off();
@@ -296,13 +324,13 @@ impl net::DeviceOperations for EncAdapter {
     }
 }
 
-struct EncIrqHandler {
+struct Enc28j60IrqHandler {
     work: workqueue::Work,
-    enc: Arc<EncAdapter>,
+    adapter: Arc<Enc28j60Adapter>,
 }
 
-impl irq::ThreadedHandler for EncIrqHandler {
-    type Data = Arc<EncIrqHandler>;
+impl irq::ThreadedHandler for Enc28j60IrqHandler {
+    type Data = Arc<Enc28j60IrqHandler>;
 
     fn handle_threaded_irq(data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> irq::Return {
         workqueue::system().enqueue(data.into());
@@ -311,27 +339,27 @@ impl irq::ThreadedHandler for EncIrqHandler {
     }
 }
 
-kernel::impl_self_work_adapter!(EncIrqHandler, work, |irq_handler| {
+kernel::impl_self_work_adapter!(Enc28j60IrqHandler, work, |irq_handler| {
     pr_info!("enc28j60 workqueue callback\n");
 
-    let inner = irq_handler.enc.inner.lock();
+    let inner = irq_handler.adapter.inner.lock();
     dev_info!(from_dev(&inner.spidev), "enc28j60 workqueue callback\n");
 });
 
-type EncIdInfo = ();
+type Enc28j60IdInfo = ();
 
-impl spi::Driver for EncAdapter {
-    kernel::define_of_id_table! {EncIdInfo, [
+impl spi::Driver for Enc28j60Adapter {
+    kernel::define_of_id_table! {Enc28j60IdInfo, [
         (of::DeviceId::Compatible(b"microchip,enc28j60"), None),
     ]}
 
-    kernel::define_spi_id_table! {EncIdInfo, [
+    kernel::define_spi_id_table! {Enc28j60IdInfo, [
         (spi::DeviceId(b"enc28j60"), None),
     ]}
 
-    type Data = Arc<EncAdapter>;
+    type IdInfo = Enc28j60IdInfo;
 
-    type IdInfo = EncIdInfo;
+    type Data = Arc<Enc28j60Adapter>;
 
     fn probe(
         spidev: spi::Device,
@@ -349,17 +377,17 @@ impl spi::Driver for EncAdapter {
         let netdev_reg = net::Registration::try_new(&spidev)?;
         let netdev = netdev_reg.dev_get();
 
-        let enc = Arc::try_new(EncAdapter::try_new(spidev)?)?;
+        let adapter = Arc::try_new(Enc28j60Adapter::try_new(spidev)?)?;
 
-        let irq_handler = UniqueArc::try_new(EncIrqHandler {
-            // SAFETY: `work` is initialized immediately in the next statement
+        let irq_handler = UniqueArc::try_new(Enc28j60IrqHandler {
+            // SAFETY: `work` is initialized immediately in the next statement.
             work: unsafe { workqueue::Work::new() },
-            enc: enc.clone(),
+            adapter: adapter.clone(),
         })?;
         kernel::init_work_item!(&irq_handler);
 
         {
-            let mut inner = enc.inner.lock();
+            let mut inner = adapter.inner.lock();
 
             inner.netdev_reg = Some(netdev_reg);
             inner.set_random_macaddr()?;
@@ -374,10 +402,14 @@ impl spi::Driver for EncAdapter {
             netdev.set_if_port(bindings::IF_PORT_10BASET as _);
             netdev.set_irq(irq);
 
-            inner.netdev_reg.as_mut().unwrap().register(enc.clone())?;
+            inner
+                .netdev_reg
+                .as_mut()
+                .unwrap()
+                .register(adapter.clone())?;
         }
 
-        Ok(enc)
+        Ok(adapter)
     }
 
     fn remove(spidev: spi::Device, _data: &Self::Data) {
@@ -390,7 +422,7 @@ impl spi::Driver for EncAdapter {
 }
 
 module_spi_driver! {
-    type: EncAdapter,
+    type: Enc28j60Adapter,
     name: "rust_enc28j60",
     description: "ENC28J60 ethernet driver written in Rust",
     license: "GPL",

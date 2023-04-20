@@ -151,6 +151,15 @@ pub(crate) mod register {
     }
 
     pub(crate) const EIR: ControlRegisterU8 = ControlRegisterU8::new(None, 0x1c);
+    pub(crate) mod eir {
+        pub(crate) const RXERIF: u8 = 0b00000001;
+        pub(crate) const TXERIF: u8 = 0b00000010;
+        pub(crate) const TXIF: u8 = 0b00001000;
+        pub(crate) const LINKIF: u8 = 0b00010000;
+        pub(crate) const DMAIF: u8 = 0b00100000;
+        pub(crate) const PKTIF: u8 = 0b01000000;
+    }
+
     pub(crate) const ESTAT: ControlRegisterU8 = ControlRegisterU8::new(None, 0x1d);
 
     pub(crate) const ECON2: ControlRegisterU8 = ControlRegisterU8::new(None, 0x1e);
@@ -323,7 +332,13 @@ pub(crate) mod register {
     pub(crate) const PHHID2: PhyRegister = PhyRegister { addr: 0x03 };
     pub(crate) const PHCON2: PhyRegister = PhyRegister { addr: 0x10 };
     pub(crate) const PHSTAT2: PhyRegister = PhyRegister { addr: 0x11 };
+
     pub(crate) const PHIE: PhyRegister = PhyRegister { addr: 0x12 };
+    pub(crate) mod phie {
+        pub(crate) const PLNKIE: u16 = 1 << 4;
+        pub(crate) const PGEIE: u16 = 1 << 1;
+    }
+
     pub(crate) const PHIR: PhyRegister = PhyRegister { addr: 0x13 };
     pub(crate) const PHLCON: PhyRegister = PhyRegister { addr: 0x14 };
 }
