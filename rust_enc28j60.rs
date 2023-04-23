@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use {
+    core::fmt::Debug,
     core::time::Duration,
     kernel::{
         bindings,
@@ -23,57 +24,52 @@ const RXFIFO_INIT: BufferRange = 0x0000..=0x19ff;
 const TXFIFO_INIT: BufferRange = 0x1a00..=0x1fff;
 
 const ENC28J60_LAMPS_MODE: u16 = 0x3476;
-
 const ETH_MAX_FRAME_LEN: u16 = 1518;
 
 #[allow(non_upper_case_globals)]
 const from_dev: fn(&dyn RawDevice) -> kernel::device::Device = kernel::device::Device::from_dev;
 
-struct Enc28j60Device {
+struct Enc28j60Driver {
     bank: Bank,
     spidev: spi::Device,
     netdev_reg: Option<net::Registration<Enc28j60Adapter>>,
-    irq: Option<irq::ThreadedRegistration<Enc28j60IrqHandler>>,
+    irq: Option<irq::ThreadedRegistration<Enc28j60Adapter>>,
     hw_enabled: bool,
     next_packet_ptr: u16,
+    skb: Option<ARef<net::SkBuff>>,
 }
 
-impl Enc28j60Device {
-    fn read<T: Register>(&mut self, reg: T, command: Command) -> Result<T::Size> {
-        self.switch_bank(reg.bank())?;
-        reg.read(&self.spidev, command)
-    }
-
-    fn write<T: Register>(&mut self, reg: T, command: Command, data: T::Size) -> Result {
-        self.switch_bank(reg.bank())?;
-        reg.write(&self.spidev, command, data)
-    }
-
-    fn switch_bank(&mut self, bank: Option<Bank>) -> Result {
-        match bank {
-            Some(bank) if self.bank != bank => set_bank(&self.spidev, bank),
-            _ => Ok(()),
-        }
-    }
-
+impl Enc28j60Driver {
     fn netdev(&self) -> ARef<net::Device> {
         // netdev_reg is not None until `spi::Driver` gets removed
         self.netdev_reg.as_ref().unwrap().dev_get()
     }
 
-    fn wait_for_ready<T: Register>(
-        &mut self,
-        reg: T,
-        mask: <T as Register>::Size,
-        val: <T as Register>::Size,
-    ) -> Result {
-        kernel::delay::coarse_sleep(Duration::from_millis(1));
-
-        while self.read(reg, Command::Rcr)? & mask != val {
-            kernel::delay::coarse_sleep(Duration::from_millis(1));
+    fn switch_bank<T: Register>(&mut self, reg: T) -> Result {
+        match reg.bank() {
+            Some(bank) if self.bank != bank => {
+                ECON1.write(&self.spidev, Command::Bfc, econ1::BSEL1 | econ1::BSEL0)?;
+                ECON1.write(&self.spidev, Command::Bfs, bank as _)?;
+                self.bank = bank;
+            }
+            _ => {}
         }
-
         Ok(())
+    }
+
+    fn read<T: Register + Debug>(&mut self, reg: T, command: Command) -> Result<T::Size> {
+        self.switch_bank(reg)?;
+        let value = reg.read(&self.spidev, command)?;
+        dev_info!(from_dev(&self.spidev), "Read: {:?}={:04x}\n", reg, value);
+        Ok(value)
+    }
+
+    fn write<T: Register + Debug>(&mut self, reg: T, command: Command, data: T::Size) -> Result {
+        self.switch_bank(reg)?;
+        dev_info!(from_dev(&self.spidev), "Write: {:?}={:04x}\n", reg, data);
+        reg.write(&self.spidev, command, data)
+        //dev_info!(from_dev(&self.spidev), "Read: {:?}={:02x}\n", reg, self.read(reg, Command::Rcr)?);
+        //Ok(())
     }
 
     fn read_phy(&mut self, reg: PhyRegister) -> Result<u16> {
@@ -100,12 +96,29 @@ impl Enc28j60Device {
         self.wait_for_ready(MISTAT, mistat::BUSY, 0)
     }
 
+    fn wait_for_ready<T: Register + Debug>(
+        &mut self,
+        reg: T,
+        mask: <T as Register>::Size,
+        val: <T as Register>::Size,
+    ) -> Result {
+        kernel::delay::coarse_sleep(Duration::from_millis(1));
+
+        while self.read(reg, Command::Rcr)? & mask != val {
+            kernel::delay::coarse_sleep(Duration::from_millis(1));
+        }
+
+        Ok(())
+    }
+
     fn check_link_status(&mut self) -> Result {
         let phstat2 = self.read_phy(PHSTAT2)?;
-        let duplex = phstat2 & phstat2::DPXSTAT > 0;
+
+        dev_info!(from_dev(&self.spidev), "PHSTAT2={:04x}\n", phstat2);
 
         if phstat2 & phstat2::LSTAT > 0 {
             self.netdev().netif_carrier_on();
+            let duplex = phstat2 & phstat2::DPXSTAT > 0;
             dev_info!(
                 from_dev(&self.spidev),
                 "link up ({})\n",
@@ -192,6 +205,8 @@ impl Enc28j60Device {
 
         self.write(MAMXFL, Command::Wcr, ETH_MAX_FRAME_LEN)?;
 
+        self.write_phy(PHLCON, ENC28J60_LAMPS_MODE)?;
+
         self.write_phy(PHCON1, phcon1::PDPXMD)?;
         self.write_phy(PHCON2, 0x0)?;
 
@@ -243,60 +258,118 @@ impl Enc28j60Device {
         self.write(ETXND, Command::Wcr, *range.end())
     }
 
-    fn set_random_macaddr(&mut self) -> Result {
-        self.netdev().eth_hw_addr_random();
-        self.set_hw_macaddr()
+    fn set_random_macaddr(&mut self, netdev: &net::Device) -> Result {
+        netdev.eth_hw_addr_random();
+        self.set_hw_macaddr(netdev)
     }
 
-    fn set_hw_macaddr(&mut self) -> Result {
-        let netdev = self.netdev();
+    fn set_hw_macaddr(&mut self, netdev: &net::Device) -> Result {
         let dev_addr = netdev.device_address();
 
         dev_info!(from_dev(&self.spidev), "Set MAC address: {:?}\n", dev_addr);
 
-        self.write(MAADR6, Command::Wcr, dev_addr[0])?;
-        self.write(MAADR5, Command::Wcr, dev_addr[1])?;
-        self.write(MAADR4, Command::Wcr, dev_addr[2])?;
-        self.write(MAADR3, Command::Wcr, dev_addr[3])?;
-        self.write(MAADR2, Command::Wcr, dev_addr[4])?;
-        self.write(MAADR1, Command::Wcr, dev_addr[5])
+        self.write(MAADR1, Command::Wcr, dev_addr[0])?;
+        self.write(MAADR2, Command::Wcr, dev_addr[1])?;
+        self.write(MAADR3, Command::Wcr, dev_addr[2])?;
+        self.write(MAADR4, Command::Wcr, dev_addr[3])?;
+        self.write(MAADR5, Command::Wcr, dev_addr[4])?;
+        self.write(MAADR6, Command::Wcr, dev_addr[5])?;
+
+        Ok(())
     }
 }
 
 struct Enc28j60Adapter {
-    inner: Mutex<Enc28j60Device>,
+    driver: Mutex<Enc28j60Driver>,
+    workqueue: workqueue::BoxedQueue,
+    irq_work: workqueue::Work,
+    tx_work: workqueue::Work,
 }
 
-impl driver::DeviceRemoval for Enc28j60Adapter {
-    fn device_remove(&self) {
-        let (netdev_reg, irq) = {
-            let mut inner = self.inner.lock();
-            (
-                core::mem::replace(&mut inner.netdev_reg, None),
-                core::mem::replace(&mut inner.irq, None),
-            )
-        };
-        drop(irq);
-        drop(netdev_reg);
-    }
-}
+unsafe impl Send for Enc28j60Adapter {}
+unsafe impl Sync for Enc28j60Adapter {}
 
 impl Enc28j60Adapter {
-    fn try_new(spidev: spi::Device) -> Result<Self> {
-        let mut adapter = Enc28j60Device {
+    fn try_new(spidev: spi::Device) -> Result<Arc<Self>> {
+        let mut driver = Enc28j60Driver {
             bank: Bank::Bank0,
             spidev,
             netdev_reg: None,
             irq: None,
             hw_enabled: false,
             next_packet_ptr: 0,
+            skb: None,
         };
 
-        adapter.init_hardware()?;
+        driver.init_hardware()?;
 
-        Ok(Enc28j60Adapter {
-            inner: Mutex::new(adapter),
-        })
+        let adapter = UniqueArc::try_new(Enc28j60Adapter {
+            driver: Mutex::new(driver),
+            workqueue: workqueue::Queue::try_new(fmt!("enc28j60_wq"))?,
+            // SAFETY: Initialized immediately in the following statements.
+            irq_work: unsafe { workqueue::Work::new() },
+            tx_work: unsafe { workqueue::Work::new() },
+        })?;
+        kernel::init_work_item_adapter!(Enc28j60IrqWork, &adapter);
+        kernel::init_work_item_adapter!(Enc28j60TxWork, &adapter);
+
+        Ok(adapter.into())
+    }
+
+    fn request_irq(self: &Arc<Self>) -> Result {
+        let mut driver = self.driver.lock();
+
+        let irq = driver.spidev.get_irq() as _;
+        driver.irq = Some(irq::ThreadedRegistration::try_new(
+            irq,
+            self.clone(),
+            irq::flags::SHARED,
+            fmt!("enc28j60_{irq}"),
+        )?);
+
+        Ok(())
+    }
+
+    fn register_netdev(self: &Arc<Self>) -> Result {
+        let mut driver = self.driver.lock();
+        let mut netdev_reg = net::Registration::try_new(&driver.spidev)?;
+
+        let netdev = netdev_reg.dev_get();
+        driver.set_random_macaddr(&netdev)?;
+        netdev.set_if_port(bindings::IF_PORT_10BASET as _);
+        netdev.set_irq(driver.spidev.get_irq());
+
+        netdev_reg.register(self.clone())?;
+        driver.netdev_reg = Some(netdev_reg);
+        Ok(())
+    }
+}
+
+impl driver::DeviceRemoval for Enc28j60Adapter {
+    fn device_remove(&self) {
+        drop({
+            let mut driver = self.driver.lock();
+            driver.irq.take()
+        });
+
+        self.workqueue.flush();
+
+        drop({
+            let mut driver = self.driver.lock();
+            driver.netdev_reg.take()
+        });
+    }
+}
+
+impl irq::ThreadedHandler for Enc28j60Adapter {
+    type Data = Arc<Self>;
+
+    fn handle_threaded_irq(adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> irq::Return {
+        adapter
+            .workqueue
+            .enqueue_adapter::<Enc28j60IrqWork>(adapter.into());
+
+        irq::Return::Handled
     }
 }
 
@@ -304,25 +377,25 @@ impl Enc28j60Adapter {
 impl net::DeviceOperations for Enc28j60Adapter {
     type Data = Arc<Enc28j60Adapter>;
 
-    fn open(dev: &net::Device, adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
-        let mut inner = adapter.inner.lock();
-        dev_info!(from_dev(&inner.spidev), "netdev::open called\n");
+    fn open(_dev: &net::Device, adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
+        let mut driver = adapter.driver.lock();
+        dev_info!(from_dev(&driver.spidev), "netdev::open called\n");
 
-        inner.init_hardware()?;
-        inner.enable_hardware()?;
-        inner.check_link_status()?;
+        driver.init_hardware()?;
+        driver.enable_hardware()?;
+        driver.check_link_status()?;
 
-        inner.netdev().netif_start_queue();
+        driver.netdev().netif_start_queue();
 
         Ok(())
     }
 
     // Don't use `netdev_reg` as it might be None
     fn stop(dev: &net::Device, adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
-        let mut inner = adapter.inner.lock();
-        dev_info!(from_dev(&inner.spidev), "netdev::stop called\n");
+        let mut driver = adapter.driver.lock();
+        dev_info!(from_dev(&driver.spidev), "netdev::stop called\n");
 
-        inner.disable_hardware()?;
+        driver.disable_hardware()?;
 
         dev.netif_stop_queue();
 
@@ -334,61 +407,73 @@ impl net::DeviceOperations for Enc28j60Adapter {
         dev: &net::Device,
         adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>,
     ) -> net::NetdevTx {
-        //pr_info!("netdev::start_xmit called\n");
-        net::NetdevTx::Busy
+        dev.netif_stop_queue();
+        pr_info!("netdev::start_xmit called\n");
+
+        {
+            let buf: ARef<net::SkBuff> = skb.into();
+            let mut driver = adapter.driver.lock();
+            driver.skb = Some(buf);
+        }
+
+        adapter
+            .workqueue
+            .enqueue_adapter::<Enc28j60TxWork>(adapter.into());
+
+        net::NetdevTx::Ok
     }
 }
 
-struct Enc28j60IrqHandler {
-    work: workqueue::Work,
-    adapter: Arc<Enc28j60Adapter>,
-}
+struct Enc28j60TxWork;
 
-impl irq::ThreadedHandler for Enc28j60IrqHandler {
-    type Data = Arc<Enc28j60IrqHandler>;
-
-    fn handle_threaded_irq(data: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> irq::Return {
-        workqueue::system().enqueue(data.into());
-
-        irq::Return::Handled
-    }
-}
-
-kernel::impl_self_work_adapter!(Enc28j60IrqHandler, work, |irq_handler| {
+kernel::impl_work_adapter!(Enc28j60TxWork, Enc28j60Adapter, tx_work, |adapter| {
     let _ = move || -> Result {
-        let mut inner = irq_handler.adapter.inner.lock();
+        let driver = adapter.driver.lock();
+        dev_info!(from_dev(&driver.spidev), "Tx Handler\n");
+        Ok(())
+    };
+});
+
+struct Enc28j60IrqWork;
+
+kernel::impl_work_adapter!(Enc28j60IrqWork, Enc28j60Adapter, irq_work, |adapter| {
+    let _ = move || -> Result {
+        let mut driver = adapter.driver.lock();
 
         // Stop further interrupts
-        inner.write(EIE, Command::Bfc, eie::INTIE)?;
+        driver.write(EIE, Command::Bfc, eie::INTIE)?;
 
-        let eir = inner.read(EIR, Command::Rcr)?;
+        let eir = driver.read(EIR, Command::Rcr)?;
 
-        dev_info!(from_dev(&inner.spidev), "IRQ EIR={:02x}\n", eir);
+        dev_info!(from_dev(&driver.spidev), "IRQ EIR={:02x}\n", eir);
+
+        driver.check_link_status()?;
 
         // Clear IRQ flags
-        inner.write(
+        driver.write(
             EIR,
             Command::Bfc,
             eir::DMAIF | eir::LINKIF | eir::TXIF | eir::TXERIF | eir::RXERIF | eir::PKTIF,
         )?;
 
         // Enable interrupts
-        inner.write(EIE, Command::Bfs, eie::INTIE)
+        driver.write(EIE, Command::Bfs, eie::INTIE)?;
+        Ok(())
     }();
 });
 
-type Enc28j60IdInfo = ();
+type IdInfo = ();
 
 impl spi::Driver for Enc28j60Adapter {
-    kernel::define_of_id_table! {Enc28j60IdInfo, [
+    kernel::define_of_id_table! {IdInfo, [
         (of::DeviceId::Compatible(b"microchip,enc28j60"), None),
     ]}
 
-    kernel::define_spi_id_table! {Enc28j60IdInfo, [
+    kernel::define_spi_id_table! {IdInfo, [
         (spi::DeviceId(b"enc28j60"), None),
     ]}
 
-    type IdInfo = Enc28j60IdInfo;
+    type IdInfo = IdInfo;
 
     type Data = Arc<Enc28j60Adapter>;
 
@@ -404,41 +489,9 @@ impl spi::Driver for Enc28j60Adapter {
             _spi_id_info
         );
 
-        let irq = spidev.get_irq();
-        let netdev_reg = net::Registration::try_new(&spidev)?;
-        let netdev = netdev_reg.dev_get();
-
-        let adapter = Arc::try_new(Enc28j60Adapter::try_new(spidev)?)?;
-
-        let irq_handler = UniqueArc::try_new(Enc28j60IrqHandler {
-            // SAFETY: `work` is initialized immediately in the next statement.
-            work: unsafe { workqueue::Work::new() },
-            adapter: adapter.clone(),
-        })?;
-        kernel::init_work_item!(&irq_handler);
-
-        {
-            let mut inner = adapter.inner.lock();
-
-            inner.netdev_reg = Some(netdev_reg);
-            inner.set_random_macaddr()?;
-
-            inner.irq = Some(irq::ThreadedRegistration::try_new(
-                irq as _,
-                irq_handler.into(),
-                irq::flags::SHARED,
-                fmt!("enc28j60_{irq}"),
-            )?);
-
-            netdev.set_if_port(bindings::IF_PORT_10BASET as _);
-            netdev.set_irq(irq);
-
-            inner
-                .netdev_reg
-                .as_mut()
-                .unwrap()
-                .register(adapter.clone())?;
-        }
+        let adapter = Enc28j60Adapter::try_new(spidev)?;
+        adapter.request_irq()?;
+        adapter.register_netdev()?;
 
         Ok(adapter)
     }

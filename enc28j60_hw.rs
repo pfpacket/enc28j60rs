@@ -3,7 +3,6 @@
 
 use core::ops::{BitAnd, BitOr};
 use kernel::{prelude::*, spi};
-use register::*;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Bank {
@@ -18,11 +17,24 @@ pub(crate) struct ControlRegisterU8 {
     // None = common registers
     bank: Option<Bank>,
     addr: u8,
+    sprd: bool,
 }
 
 impl ControlRegisterU8 {
     const fn new(bank: Option<Bank>, addr: u8) -> Self {
-        Self { bank, addr }
+        Self {
+            bank,
+            addr,
+            sprd: false,
+        }
+    }
+
+    const fn new_with_sprd(bank: Option<Bank>, addr: u8) -> Self {
+        Self {
+            bank,
+            addr,
+            sprd: true,
+        }
     }
 }
 
@@ -58,11 +70,11 @@ pub(crate) enum Command {
     // Read Control Register (RCR)
     Rcr = 0x0,
     // Write Control Register (WCR)
-    Wcr = 0x2,
+    Wcr = 0x40,
     // Bit Field Set (BFS)
-    Bfs = 0x4,
+    Bfs = 0x80,
     // Bit Field Clear (BFC)
-    Bfc = 0x5,
+    Bfc = 0xa0,
     // Read Buffer Memory (RBM)
     Rbm = 0x3a,
     // Write Buffer Memory (WBM)
@@ -71,16 +83,12 @@ pub(crate) enum Command {
     Src = 0xff,
 }
 
-pub(crate) fn set_bank(spidev: &spi::Device, bank: Bank) -> Result {
-    ECON1.write(spidev, Command::Bfc, econ1::BSEL1 | econ1::BSEL0)?;
-    ECON1.write(spidev, Command::Bfs, bank as _)
-}
-
 pub(crate) trait Register: Copy {
     type Size: Copy
         + Clone
         + PartialEq
         + Eq
+        + core::fmt::LowerHex
         + BitAnd<Output = Self::Size>
         + BitOr<Output = Self::Size>;
 
@@ -97,16 +105,17 @@ impl Register for ControlRegisterU8 {
     }
 
     fn read(&self, spidev: &spi::Device, command: Command) -> Result<Self::Size> {
-        let tx_buf = [(command as u8) << 5 | self.addr];
-        let mut rx_buf = [0u8; 1];
+        let tx_buf = [(command as u8) | self.addr, 0];
+        let mut rx_buf = [0u8; 4];
+        let rx_len = if self.sprd { 2 } else { 1 };
 
-        spidev.write_then_read(&tx_buf, &mut rx_buf)?;
+        spidev.write_then_read(&tx_buf[..1], &mut rx_buf[..rx_len])?;
 
-        Ok(rx_buf[0])
+        Ok(rx_buf[rx_len - 1])
     }
 
     fn write(&self, spidev: &spi::Device, command: Command, data: Self::Size) -> Result {
-        let tx_buf = [(command as u8) << 5 | self.addr, data];
+        let tx_buf = [(command as u8) | self.addr, data];
 
         spidev.write(&tx_buf)
     }
@@ -239,7 +248,8 @@ pub(crate) mod register {
     //
     // Bank 2
     //
-    pub(crate) const MACON1: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x00);
+    pub(crate) const MACON1: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x00);
     pub(crate) mod macon1 {
         // MAC Receive Enable bit
         pub(crate) const MARXEN: u8 = 0b00000001;
@@ -251,7 +261,8 @@ pub(crate) mod register {
         pub(crate) const TXPAUS: u8 = 0b00001000;
     }
 
-    pub(crate) const MACON3: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x02);
+    pub(crate) const MACON3: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x02);
     pub(crate) mod macon3 {
         pub(crate) const FULLDPX: u8 = 0b00000001;
         pub(crate) const FRMLNEN: u8 = 0b00000010;
@@ -264,48 +275,67 @@ pub(crate) mod register {
         pub(crate) const PADCFG_60: u8 = 0b00100000;
     }
 
-    pub(crate) const MACON4: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x03);
+    pub(crate) const MACON4: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x03);
     pub(crate) mod macon4 {
         pub(crate) const DEFER: u8 = 0b01000000;
     }
 
-    pub(crate) const MABBIPG: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x04);
+    pub(crate) const MABBIPG: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x04);
 
-    pub(crate) const MAIPGL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x06);
-    pub(crate) const MAIPGH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x07);
+    pub(crate) const MAIPGL: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x06);
+    pub(crate) const MAIPGH: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x07);
     pub(crate) const MAIPG: ControlRegisterU16 = ControlRegisterU16::new(MAIPGL, MAIPGH);
 
-    pub(crate) const MAMXFLL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x0a);
-    pub(crate) const MAMXFLH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x0b);
+    pub(crate) const MAMXFLL: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x0a);
+    pub(crate) const MAMXFLH: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x0b);
     pub(crate) const MAMXFL: ControlRegisterU16 = ControlRegisterU16::new(MAMXFLL, MAMXFLH);
 
-    pub(crate) const MICMD: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x12);
+    pub(crate) const MICMD: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x12);
     pub(crate) mod micmd {
         pub(crate) const MIISCAN: u8 = 0b00000010;
         pub(crate) const MIIRD: u8 = 0b00000001;
     }
 
-    pub(crate) const MIREGADR: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x14);
+    pub(crate) const MIREGADR: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x14);
 
-    pub(crate) const MIWRL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x16);
-    pub(crate) const MIWRH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x17);
+    pub(crate) const MIWRL: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x16);
+    pub(crate) const MIWRH: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x17);
     pub(crate) const MIWR: ControlRegisterU16 = ControlRegisterU16::new(MIWRL, MIWRH);
 
-    pub(crate) const MIRDL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x18);
-    pub(crate) const MIRDH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x19);
+    pub(crate) const MIRDL: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x18);
+    pub(crate) const MIRDH: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x19);
     pub(crate) const MIRD: ControlRegisterU16 = ControlRegisterU16::new(MIRDL, MIRDH);
 
     //
     // Bank 3
     //
-    pub(crate) const MAADR5: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x00);
-    pub(crate) const MAADR6: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x01);
-    pub(crate) const MAADR3: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x02);
-    pub(crate) const MAADR4: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x03);
-    pub(crate) const MAADR1: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x04);
-    pub(crate) const MAADR2: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x05);
+    pub(crate) const MAADR5: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x00);
+    pub(crate) const MAADR6: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x01);
+    pub(crate) const MAADR3: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x02);
+    pub(crate) const MAADR4: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x03);
+    pub(crate) const MAADR1: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x04);
+    pub(crate) const MAADR2: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x05);
 
-    pub(crate) const MISTAT: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x0a);
+    pub(crate) const MISTAT: ControlRegisterU8 =
+        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x0a);
     pub(crate) mod mistat {
         pub(crate) const BUSY: u8 = 0b00000001;
         pub(crate) const SCAN: u8 = 0b00000010;
