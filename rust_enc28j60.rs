@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 
 use {
-    core::fmt::Debug,
     core::time::Duration,
     kernel::{
         bindings,
@@ -9,7 +8,7 @@ use {
         driver, irq, module_spi_driver, net, of,
         prelude::*,
         spi,
-        sync::{smutex::Mutex, Arc, UniqueArc},
+        sync::{smutex::Mutex, Arc, SpinLock, UniqueArc},
         types::ForeignOwnable,
         workqueue,
     },
@@ -36,7 +35,7 @@ struct Enc28j60Driver {
     irq: Option<irq::ThreadedRegistration<Enc28j60Adapter>>,
     hw_enabled: bool,
     next_packet_ptr: u16,
-    skb: Option<ARef<net::SkBuff>>,
+    buf: [u8; ETH_MAX_FRAME_LEN as usize + 4],
 }
 
 impl Enc28j60Driver {
@@ -57,19 +56,28 @@ impl Enc28j60Driver {
         Ok(())
     }
 
-    fn read<T: Register + Debug>(&mut self, reg: T, command: Command) -> Result<T::Size> {
+    fn read<T: Register>(&mut self, reg: T, command: Command) -> Result<T::Size> {
         self.switch_bank(reg)?;
-        let value = reg.read(&self.spidev, command)?;
-        dev_info!(from_dev(&self.spidev), "Read: {:?}={:04x}\n", reg, value);
-        Ok(value)
+        reg.read(&self.spidev, command)
     }
 
-    fn write<T: Register + Debug>(&mut self, reg: T, command: Command, data: T::Size) -> Result {
+    fn write<T: Register>(&mut self, reg: T, command: Command, data: T::Size) -> Result {
         self.switch_bank(reg)?;
-        dev_info!(from_dev(&self.spidev), "Write: {:?}={:04x}\n", reg, data);
         reg.write(&self.spidev, command, data)
-        //dev_info!(from_dev(&self.spidev), "Read: {:?}={:02x}\n", reg, self.read(reg, Command::Rcr)?);
-        //Ok(())
+    }
+
+    fn read_buffer(&mut self, addr: u16, rx_buf: &mut [u8]) -> Result {
+        self.write(ERDPT, Command::Wcr, addr)?;
+
+        let tx_buf = [Command::Rbm as _];
+        self.spidev.write_then_read(&tx_buf, rx_buf)
+    }
+
+    fn write_buffer(&mut self, tx_buf: &[u8]) -> Result {
+        let buf = &mut self.buf[..tx_buf.len() + 1];
+        buf[0] = Command::Wbm as _;
+        buf[1..].copy_from_slice(&tx_buf);
+        self.spidev.write(buf)
     }
 
     fn read_phy(&mut self, reg: PhyRegister) -> Result<u16> {
@@ -96,15 +104,13 @@ impl Enc28j60Driver {
         self.wait_for_ready(MISTAT, mistat::BUSY, 0)
     }
 
-    fn wait_for_ready<T: Register + Debug>(
+    fn wait_for_ready<T: Register>(
         &mut self,
         reg: T,
         mask: <T as Register>::Size,
         val: <T as Register>::Size,
     ) -> Result {
-        kernel::delay::coarse_sleep(Duration::from_millis(1));
-
-        while self.read(reg, Command::Rcr)? & mask != val {
+        while (self.read(reg, Command::Rcr)? & mask) != val {
             kernel::delay::coarse_sleep(Duration::from_millis(1));
         }
 
@@ -114,11 +120,9 @@ impl Enc28j60Driver {
     fn check_link_status(&mut self) -> Result {
         let phstat2 = self.read_phy(PHSTAT2)?;
 
-        dev_info!(from_dev(&self.spidev), "PHSTAT2={:04x}\n", phstat2);
-
-        if phstat2 & phstat2::LSTAT > 0 {
+        if (phstat2 & phstat2::LSTAT) != 0 {
             self.netdev().netif_carrier_on();
-            let duplex = phstat2 & phstat2::DPXSTAT > 0;
+            let duplex = (phstat2 & phstat2::DPXSTAT) != 0;
             dev_info!(
                 from_dev(&self.spidev),
                 "link up ({})\n",
@@ -148,7 +152,6 @@ impl Enc28j60Driver {
 
         // Start RX
         self.write(ECON1, Command::Bfs, econ1::RXEN)?;
-
         self.hw_enabled = true;
 
         Ok(())
@@ -168,6 +171,8 @@ impl Enc28j60Driver {
         self.write(ECON1, Command::Wcr, 0x0)?;
         self.bank = Bank::Bank0;
 
+        self.hw_enabled = false;
+
         let revision = self.read(EREVID, Command::Rcr)?;
         dev_info!(from_dev(&self.spidev), "ENC28J60 EREVID = {}\n", revision);
         if revision == 0 || revision == 0xff {
@@ -175,7 +180,7 @@ impl Enc28j60Driver {
         }
 
         // Enable address auto increment
-        self.write(ECON2, Command::Wcr, econ2::AUTO_INC)?;
+        self.write(ECON2, Command::Wcr, econ2::AUTOINC)?;
 
         self.init_rxfifo(&RXFIFO_INIT)?;
         self.init_txfifo(&TXFIFO_INIT)?;
@@ -194,13 +199,12 @@ impl Enc28j60Driver {
             macon1::MARXEN | macon1::RXPAUS | macon1::TXPAUS,
         )?;
 
-        // - Enable full duplex mode
         self.write(
             MACON3,
             Command::Wcr,
-            macon3::FULLDPX | macon3::FRMLNEN | macon3::TXCRCEN | macon3::PADCFG_60,
+            macon3::FULDPX | macon3::FRMLNEN | macon3::TXCRCEN | macon3::PADCFG0,
         )?;
-        self.write(MAIPGL, Command::Wcr, 0x12)?;
+        self.write(MAIPG, Command::Wcr, 0x12)?;
         self.write(MABBIPG, Command::Wcr, 0x15)?;
 
         self.write(MAMXFL, Command::Wcr, ETH_MAX_FRAME_LEN)?;
@@ -266,16 +270,103 @@ impl Enc28j60Driver {
     fn set_hw_macaddr(&mut self, netdev: &net::Device) -> Result {
         let dev_addr = netdev.device_address();
 
-        dev_info!(from_dev(&self.spidev), "Set MAC address: {:?}\n", dev_addr);
+        dev_info!(
+            from_dev(&self.spidev),
+            "MAC address: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+            dev_addr[0],
+            dev_addr[1],
+            dev_addr[2],
+            dev_addr[3],
+            dev_addr[4],
+            dev_addr[5]
+        );
 
-        self.write(MAADR1, Command::Wcr, dev_addr[0])?;
-        self.write(MAADR2, Command::Wcr, dev_addr[1])?;
-        self.write(MAADR3, Command::Wcr, dev_addr[2])?;
-        self.write(MAADR4, Command::Wcr, dev_addr[3])?;
-        self.write(MAADR5, Command::Wcr, dev_addr[4])?;
-        self.write(MAADR6, Command::Wcr, dev_addr[5])?;
+        for (reg, addr) in [MAADR1, MAADR2, MAADR3, MAADR4, MAADR5, MAADR6]
+            .iter()
+            .zip(dev_addr)
+        {
+            self.write(*reg, Command::Wcr, *addr)?;
+        }
 
         Ok(())
+    }
+
+    fn handle_rx(&mut self) -> Result<bool> {
+        let packet_count = self.read(EPKTCNT, Command::Rcr)?;
+        if packet_count == 0 {
+            return Ok(false);
+        }
+
+        dev_info!(from_dev(&self.spidev), "RX: packet count: {}", packet_count);
+        for _ in 0..packet_count {
+            self.handle_rx_packet()?;
+            self.write(ECON2, Command::Bfs, econ2::PKTDEC)?;
+            dev_info!(
+                from_dev(&self.spidev),
+                "packet count dec: {}\n",
+                self.read(EPKTCNT, Command::Rcr)?
+            );
+        }
+
+        Ok(true)
+    }
+
+    fn handle_rx_packet(&mut self) -> Result {
+        let mut rsv = [0; RxStatusVector::size()];
+        self.read_buffer(self.next_packet_ptr, &mut rsv)?;
+        let rsv = RxStatusVector::new(&rsv);
+
+        let a1 = self.read(ERDPT, Command::Rcr)?;
+        let a2 = self.read(ERXRDPT, Command::Rcr)?;
+        let a3 = self.read(ERXWRPT, Command::Rcr)?;
+        dev_info!(
+            from_dev(&self.spidev),
+            "ERDPT={:02x} ERXRDPT={:02x} ERXWRPT={:02x}\n",
+            a1,
+            a2,
+            a3
+        );
+        dev_info!(from_dev(&self.spidev), "RSV: {:?}\n", rsv);
+
+        if !rsv.status(RsvMask::RxOk)
+            || rsv.status(RsvMask::CrcError)
+            || rsv.status(RsvMask::LengthCheckError)
+        {
+            dev_info!(
+                from_dev(&self.spidev),
+                "RSV: error: RxOk={} Crc={} LenError={} LenOOR={}\n",
+                rsv.status(RsvMask::RxOk),
+                rsv.status(RsvMask::CrcError),
+                rsv.status(RsvMask::LengthCheckError),
+                rsv.status(RsvMask::LengthOutOfRange)
+            );
+        } else {
+            let netdev = self.netdev();
+
+            let skb = netdev.alloc_skb_ip_align(rsv.byte_count as _)?;
+            let room = skb.put(rsv.byte_count as _);
+
+            let read_ptr = Self::next_rx_start(self.next_packet_ptr);
+            self.read_buffer(read_ptr, room)?;
+
+            skb.set_protocol(skb.eth_type_trans(&netdev));
+            netdev.netif_rx(&skb);
+        }
+
+        self.next_packet_ptr = rsv.next_ptr;
+        let erxrdpt = Self::erxrdpt_workaround(rsv.next_ptr, &RXFIFO_INIT);
+        self.write(ERXRDPT, Command::Rcr, erxrdpt)?;
+
+        Ok(())
+    }
+
+    fn next_rx_start(ptr: u16) -> u16 {
+        const RSV_SIZE: u16 = RxStatusVector::size() as _;
+        if RXFIFO_INIT.contains(&(ptr + RSV_SIZE)) {
+            ptr + RSV_SIZE
+        } else {
+            (ptr + RSV_SIZE) - (RXFIFO_INIT.end() - RXFIFO_INIT.start() + 1)
+        }
     }
 }
 
@@ -284,8 +375,17 @@ struct Enc28j60Adapter {
     workqueue: workqueue::BoxedQueue,
     irq_work: workqueue::Work,
     tx_work: workqueue::Work,
+    tx_skb: SpinLock<Option<ARef<net::SkBuff>>>,
 }
 
+// SAFETY:
+//  - `Send` for `workqueue::Work` and `ARef<SkBuff>`.
+//     The types lack Send due to holding raw pointers.
+//     It's safe to send them to other threads.
+//     Dereferencing raw pointers is unsafe anyway.
+//  - `Sync` for `workqueue::Work`.
+//     The type lacks Sync due to holding raw pointers.
+//     `Work` wraps `work_struct` which is a thread-safe type.
 unsafe impl Send for Enc28j60Adapter {}
 unsafe impl Sync for Enc28j60Adapter {}
 
@@ -298,20 +398,25 @@ impl Enc28j60Adapter {
             irq: None,
             hw_enabled: false,
             next_packet_ptr: 0,
-            skb: None,
+            buf: [0; ETH_MAX_FRAME_LEN as usize + 4],
         };
 
         driver.init_hardware()?;
 
-        let adapter = UniqueArc::try_new(Enc28j60Adapter {
+        let mut adapter = UniqueArc::try_new(Enc28j60Adapter {
             driver: Mutex::new(driver),
             workqueue: workqueue::Queue::try_new(fmt!("enc28j60_wq"))?,
             // SAFETY: Initialized immediately in the following statements.
             irq_work: unsafe { workqueue::Work::new() },
             tx_work: unsafe { workqueue::Work::new() },
+            tx_skb: unsafe { SpinLock::new(None) },
         })?;
-        kernel::init_work_item_adapter!(Enc28j60IrqWork, &adapter);
-        kernel::init_work_item_adapter!(Enc28j60TxWork, &adapter);
+        kernel::init_work_item_adapter!(IrqWorkHandler, &adapter);
+        kernel::init_work_item_adapter!(TxWorkHandler, &adapter);
+        kernel::spinlock_init!(
+            unsafe { Pin::new_unchecked(&mut adapter.tx_skb) },
+            "enc_skb"
+        );
 
         Ok(adapter.into())
     }
@@ -361,27 +466,17 @@ impl driver::DeviceRemoval for Enc28j60Adapter {
     }
 }
 
-impl irq::ThreadedHandler for Enc28j60Adapter {
-    type Data = Arc<Self>;
-
-    fn handle_threaded_irq(adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> irq::Return {
-        adapter
-            .workqueue
-            .enqueue_adapter::<Enc28j60IrqWork>(adapter.into());
-
-        irq::Return::Handled
-    }
-}
-
 #[vtable]
 impl net::DeviceOperations for Enc28j60Adapter {
     type Data = Arc<Enc28j60Adapter>;
 
-    fn open(_dev: &net::Device, adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
+    fn open(dev: &net::Device, adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> Result {
         let mut driver = adapter.driver.lock();
         dev_info!(from_dev(&driver.spidev), "netdev::open called\n");
 
+        driver.disable_hardware()?;
         driver.init_hardware()?;
+        driver.set_hw_macaddr(dev)?;
         driver.enable_hardware()?;
         driver.check_link_status()?;
 
@@ -395,9 +490,9 @@ impl net::DeviceOperations for Enc28j60Adapter {
         let mut driver = adapter.driver.lock();
         dev_info!(from_dev(&driver.spidev), "netdev::stop called\n");
 
-        driver.disable_hardware()?;
-
         dev.netif_stop_queue();
+
+        driver.disable_hardware()?;
 
         Ok(())
     }
@@ -410,55 +505,124 @@ impl net::DeviceOperations for Enc28j60Adapter {
         dev.netif_stop_queue();
         pr_info!("netdev::start_xmit called\n");
 
+        let buf: ARef<net::SkBuff> = skb.into();
         {
-            let buf: ARef<net::SkBuff> = skb.into();
-            let mut driver = adapter.driver.lock();
-            driver.skb = Some(buf);
+            *adapter.tx_skb.lock_irqdisable() = Some(buf);
         }
 
         adapter
             .workqueue
-            .enqueue_adapter::<Enc28j60TxWork>(adapter.into());
+            .enqueue_adapter::<TxWorkHandler>(adapter.into());
 
         net::NetdevTx::Ok
     }
 }
 
-struct Enc28j60TxWork;
+impl irq::ThreadedHandler for Enc28j60Adapter {
+    type Data = Arc<Self>;
 
-kernel::impl_work_adapter!(Enc28j60TxWork, Enc28j60Adapter, tx_work, |adapter| {
-    let _ = move || -> Result {
-        let driver = adapter.driver.lock();
-        dev_info!(from_dev(&driver.spidev), "Tx Handler\n");
-        Ok(())
-    };
-});
+    fn handle_threaded_irq(adapter: <Self::Data as ForeignOwnable>::Borrowed<'_>) -> irq::Return {
+        adapter
+            .workqueue
+            .enqueue_adapter::<IrqWorkHandler>(adapter.into());
 
-struct Enc28j60IrqWork;
+        irq::Return::Handled
+    }
+}
 
-kernel::impl_work_adapter!(Enc28j60IrqWork, Enc28j60Adapter, irq_work, |adapter| {
+struct IrqWorkHandler;
+
+kernel::impl_work_adapter!(IrqWorkHandler, Enc28j60Adapter, irq_work, |adapter| {
     let _ = move || -> Result {
         let mut driver = adapter.driver.lock();
 
         // Stop further interrupts
         driver.write(EIE, Command::Bfc, eie::INTIE)?;
 
-        let eir = driver.read(EIR, Command::Rcr)?;
+        let mut iteration = false;
+        while {
+            let eir = driver.read(EIR, Command::Rcr)?;
+            if eir != 0x0 {
+                dev_info!(from_dev(&driver.spidev), "IRQ EIR={:02x}\n", eir);
+            }
 
-        dev_info!(from_dev(&driver.spidev), "IRQ EIR={:02x}\n", eir);
+            if eir & eir::DMAIF != 0 {
+                iteration = true;
+                driver.write(EIR, Command::Bfc, eir::DMAIF)?;
+            }
 
-        driver.check_link_status()?;
+            if eir & eir::LINKIF != 0 {
+                iteration = true;
+                driver.check_link_status()?;
+                let _ = driver.read_phy(PHIR)?;
+            }
 
-        // Clear IRQ flags
-        driver.write(
-            EIR,
-            Command::Bfc,
-            eir::DMAIF | eir::LINKIF | eir::TXIF | eir::TXERIF | eir::RXERIF | eir::PKTIF,
-        )?;
+            if eir & eir::TXIF != 0 && eir & eir::TXERIF == 0 {
+                iteration = true;
+                dev_info!(from_dev(&driver.spidev), "TX completed\n");
+                let _ = adapter.tx_skb.lock().as_mut().take();
+                driver.write(ECON1, Command::Bfc, econ1::TXRTS)?;
+                driver.netdev().netif_wake_queue();
+                driver.write(EIR, Command::Bfc, eir::TXIF)?;
+            }
+
+            if eir & eir::TXERIF != 0 {
+                iteration = true;
+                dev_info!(from_dev(&driver.spidev), "TX failed\n");
+                let _ = adapter.tx_skb.lock().as_mut().take();
+                driver.write(ECON1, Command::Bfc, econ1::TXRTS)?;
+                driver.netdev().netif_wake_queue();
+                driver.write(EIR, Command::Bfc, eir::TXERIF | eir::TXIF)?;
+            }
+
+            if eir & eir::RXERIF != 0 {
+                iteration = true;
+                driver.write(EIR, Command::Bfc, eir::RXERIF)?;
+            }
+
+            if driver.handle_rx()? {
+                iteration = true;
+            }
+
+            iteration
+        } {
+            iteration = false;
+        }
 
         // Enable interrupts
-        driver.write(EIE, Command::Bfs, eie::INTIE)?;
-        Ok(())
+        driver.write(EIE, Command::Bfs, eie::INTIE)
+    }();
+});
+
+struct TxWorkHandler;
+
+kernel::impl_work_adapter!(TxWorkHandler, Enc28j60Adapter, tx_work, |adapter| {
+    let _ = move || -> Result {
+        let skb = {
+            let skb = adapter.tx_skb.lock();
+            // DeviceOperations::start_xmit stores the RX `SkBuff`
+            skb.as_ref().unwrap().clone()
+        };
+        let skb_data = skb.head_data();
+
+        let mut driver = adapter.driver.lock();
+        dev_info!(
+            from_dev(&driver.spidev),
+            "TX handler: len={}\n",
+            skb_data.len()
+        );
+
+        driver.write(EWRPT, Command::Rcr, *TXFIFO_INIT.start())?;
+        driver.write(
+            ETXND,
+            Command::Rcr,
+            TXFIFO_INIT.start() + skb_data.len() as u16,
+        )?;
+
+        driver.spidev.write(&[Command::Wbm as _, 0])?;
+        driver.write_buffer(skb_data)?;
+
+        driver.write(ECON1, Command::Bfs, econ1::TXRTS)
     }();
 });
 

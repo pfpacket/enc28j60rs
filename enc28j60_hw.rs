@@ -17,7 +17,7 @@ pub(crate) struct ControlRegisterU8 {
     // None = common registers
     bank: Option<Bank>,
     addr: u8,
-    sprd: bool,
+    eth: bool,
 }
 
 impl ControlRegisterU8 {
@@ -25,15 +25,14 @@ impl ControlRegisterU8 {
         Self {
             bank,
             addr,
-            sprd: false,
+            eth: false,
         }
     }
 
-    const fn new_with_sprd(bank: Option<Bank>, addr: u8) -> Self {
+    const fn eth(bank: Option<Bank>, addr: u8) -> Self {
         Self {
-            bank,
-            addr,
-            sprd: true,
+            eth: true,
+            ..Self::new(bank, addr)
         }
     }
 }
@@ -106,8 +105,8 @@ impl Register for ControlRegisterU8 {
 
     fn read(&self, spidev: &spi::Device, command: Command) -> Result<Self::Size> {
         let tx_buf = [(command as u8) | self.addr, 0];
-        let mut rx_buf = [0u8; 4];
-        let rx_len = if self.sprd { 2 } else { 1 };
+        let mut rx_buf = [0u8; 2];
+        let rx_len = if self.eth { 1 } else { 2 };
 
         spidev.write_then_read(&tx_buf[..1], &mut rx_buf[..rx_len])?;
 
@@ -148,219 +147,227 @@ pub(crate) mod register {
     //
     // Common Bank
     //
-    pub(crate) const EIE: ControlRegisterU8 = ControlRegisterU8::new(None, 0x1b);
+    pub(crate) const EIE: ControlRegisterU8 = ControlRegisterU8::eth(None, 0x1b);
     pub(crate) mod eie {
-        pub(crate) const RXERIE: u8 = 0b00000001;
-        pub(crate) const TXERIE: u8 = 0b00000010;
-        pub(crate) const TXIE: u8 = 0b00001000;
-        pub(crate) const LINKIE: u8 = 0b00010000;
-        pub(crate) const DMAIE: u8 = 0b00100000;
-        pub(crate) const PKTIE: u8 = 0b01000000;
-        pub(crate) const INTIE: u8 = 0b10000000;
+        pub(crate) const INTIE: u8 = 0x80;
+        pub(crate) const PKTIE: u8 = 0x40;
+        pub(crate) const DMAIE: u8 = 0x20;
+        pub(crate) const LINKIE: u8 = 0x10;
+        pub(crate) const TXIE: u8 = 0x08;
+        pub(crate) const TXERIE: u8 = 0x02;
+        pub(crate) const RXERIE: u8 = 0x01;
     }
 
-    pub(crate) const EIR: ControlRegisterU8 = ControlRegisterU8::new(None, 0x1c);
+    pub(crate) const EIR: ControlRegisterU8 = ControlRegisterU8::eth(None, 0x1c);
     pub(crate) mod eir {
-        pub(crate) const RXERIF: u8 = 0b00000001;
-        pub(crate) const TXERIF: u8 = 0b00000010;
-        pub(crate) const TXIF: u8 = 0b00001000;
-        pub(crate) const LINKIF: u8 = 0b00010000;
-        pub(crate) const DMAIF: u8 = 0b00100000;
-        pub(crate) const PKTIF: u8 = 0b01000000;
+        pub(crate) const PKTIF: u8 = 0x40;
+        pub(crate) const DMAIF: u8 = 0x20;
+        pub(crate) const LINKIF: u8 = 0x10;
+        pub(crate) const TXIF: u8 = 0x08;
+        pub(crate) const TXERIF: u8 = 0x02;
+        pub(crate) const RXERIF: u8 = 0x01;
     }
 
-    pub(crate) const ESTAT: ControlRegisterU8 = ControlRegisterU8::new(None, 0x1d);
+    pub(crate) const ESTAT: ControlRegisterU8 = ControlRegisterU8::eth(None, 0x1d);
+    pub(crate) mod estat {
+        pub(crate) const INT: u8 = 0x80;
+        pub(crate) const LATECOL: u8 = 0x10;
+        pub(crate) const RXBUSY: u8 = 0x04;
+        pub(crate) const TXABRT: u8 = 0x02;
+        pub(crate) const CLKRDY: u8 = 0x01;
+    }
 
-    pub(crate) const ECON2: ControlRegisterU8 = ControlRegisterU8::new(None, 0x1e);
+    pub(crate) const ECON2: ControlRegisterU8 = ControlRegisterU8::eth(None, 0x1e);
     pub(crate) mod econ2 {
-        pub(crate) const AUTO_INC: u8 = 0b10000000;
+        pub(crate) const AUTOINC: u8 = 0x80;
+        pub(crate) const PKTDEC: u8 = 0x40;
+        pub(crate) const PWRSV: u8 = 0x20;
+        pub(crate) const VRPS: u8 = 0x08;
     }
 
-    pub(crate) const ECON1: ControlRegisterU8 = ControlRegisterU8::new(None, 0x1f);
+    pub(crate) const ECON1: ControlRegisterU8 = ControlRegisterU8::eth(None, 0x1f);
     pub(crate) mod econ1 {
-        pub(crate) const BSEL0: u8 = 0b00000001;
-        pub(crate) const BSEL1: u8 = 0b00000010;
-        pub(crate) const RXEN: u8 = 0b00000100;
-        pub(crate) const TXRTS: u8 = 0b00001000;
-        pub(crate) const CSUMEN: u8 = 0b00010000;
-        pub(crate) const DMAST: u8 = 0b00100000;
-        pub(crate) const RXRST: u8 = 0b01000000;
-        pub(crate) const TXRST: u8 = 0b10000000;
+        pub(crate) const TXRST: u8 = 0x80;
+        pub(crate) const RXRST: u8 = 0x40;
+        pub(crate) const DMAST: u8 = 0x20;
+        pub(crate) const CSUMEN: u8 = 0x10;
+        pub(crate) const TXRTS: u8 = 0x08;
+        pub(crate) const RXEN: u8 = 0x04;
+        pub(crate) const BSEL1: u8 = 0x02;
+        pub(crate) const BSEL0: u8 = 0x01;
     }
+
+    //
+    // Bank 0
+    //
+    pub(crate) const ERDPTL: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x00);
+    pub(crate) const ERDPTH: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x01);
+    pub(crate) const ERDPT: ControlRegisterU16 = ControlRegisterU16::new(ERDPTL, ERDPTH);
+
+    pub(crate) const EWRPTL: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x02);
+    pub(crate) const EWRPTH: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x03);
+    pub(crate) const EWRPT: ControlRegisterU16 = ControlRegisterU16::new(EWRPTL, EWRPTH);
+
+    pub(crate) const ETXSTL: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x04);
+    pub(crate) const ETXSTH: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x05);
+    pub(crate) const ETXST: ControlRegisterU16 = ControlRegisterU16::new(ETXSTL, ETXSTH);
+
+    pub(crate) const ETXNDL: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x06);
+    pub(crate) const ETXNDH: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x07);
+    pub(crate) const ETXND: ControlRegisterU16 = ControlRegisterU16::new(ETXNDL, ETXNDH);
+
+    pub(crate) const ERXSTL: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x08);
+    pub(crate) const ERXSTH: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x09);
+    pub(crate) const ERXST: ControlRegisterU16 = ControlRegisterU16::new(ERXSTL, ERXSTH);
+
+    pub(crate) const ERXNDL: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x0a);
+    pub(crate) const ERXNDH: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x0b);
+    pub(crate) const ERXND: ControlRegisterU16 = ControlRegisterU16::new(ERXNDL, ERXNDH);
+
+    pub(crate) const ERXRDPTL: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x0c);
+    pub(crate) const ERXRDPTH: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x0d);
+    pub(crate) const ERXRDPT: ControlRegisterU16 = ControlRegisterU16::new(ERXRDPTL, ERXRDPTH);
+
+    pub(crate) const ERXWRPTL: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x0e);
+    pub(crate) const ERXWRPTH: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank0), 0x0f);
+    pub(crate) const ERXWRPT: ControlRegisterU16 = ControlRegisterU16::new(ERXWRPTL, ERXWRPTH);
 
     //
     // Bank 1
     //
-    pub(crate) const ERDPTL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x00);
-    pub(crate) const ERDPTH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x01);
-    pub(crate) const ERDPT: ControlRegisterU16 = ControlRegisterU16::new(ERDPTL, ERDPTH);
-
-    pub(crate) const EWRPTL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x02);
-    pub(crate) const EWRPTH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x03);
-    pub(crate) const EWRPT: ControlRegisterU16 = ControlRegisterU16::new(EWRPTL, EWRPTH);
-
-    pub(crate) const ETXSTL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x04);
-    pub(crate) const ETXSTH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x05);
-    pub(crate) const ETXST: ControlRegisterU16 = ControlRegisterU16::new(ETXSTL, ETXSTH);
-
-    pub(crate) const ETXNDL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x06);
-    pub(crate) const ETXNDH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x07);
-    pub(crate) const ETXND: ControlRegisterU16 = ControlRegisterU16::new(ETXNDL, ETXNDH);
-
-    pub(crate) const ERXSTL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x08);
-    pub(crate) const ERXSTH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x09);
-    pub(crate) const ERXST: ControlRegisterU16 = ControlRegisterU16::new(ERXSTL, ERXSTH);
-
-    pub(crate) const ERXNDL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x0a);
-    pub(crate) const ERXNDH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x0b);
-    pub(crate) const ERXND: ControlRegisterU16 = ControlRegisterU16::new(ERXNDL, ERXNDH);
-
-    pub(crate) const ERXRDPTL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x0c);
-    pub(crate) const ERXRDPTH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x0d);
-    pub(crate) const ERXRDPT: ControlRegisterU16 = ControlRegisterU16::new(ERXRDPTL, ERXRDPTH);
-
-    pub(crate) const ERXWRPTL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x0e);
-    pub(crate) const ERXWRPTH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank0), 0x0f);
-    pub(crate) const ERXWRPT: ControlRegisterU16 = ControlRegisterU16::new(ERXWRPTL, ERXWRPTH);
-
-    pub(crate) const ERXFCON: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank1), 0x18);
+    pub(crate) const ERXFCON: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank1), 0x18);
     pub(crate) mod erxfcon {
-        // Brodcast Filter Enable bit
-        pub(crate) const BCEN: u8 = 0b00000001;
-        // Multicast Filter Enable bit
-        pub(crate) const MCEN: u8 = 0b00000010;
-        // Hash Table Filter Enable bit
-        pub(crate) const HTEN: u8 = 0b00000100;
-        // Magic Packet Filter Enable bit
-        pub(crate) const MPEN: u8 = 0b00001000;
-        // Pattern Match Filter Enable bit
-        pub(crate) const PMEN: u8 = 0b00010000;
-        // Post-Filter CRC Check Enable bit
-        pub(crate) const CRCEN: u8 = 0b00100000;
-        // AND/OR Filter Select bit
-        pub(crate) const ANDOR: u8 = 0b01000000;
         // Unicast Filter Enable bit
-        pub(crate) const UCEN: u8 = 0b10000000;
+        pub(crate) const UCEN: u8 = 0x80;
+        // AND/OR Filter Select bit
+        pub(crate) const ANDOR: u8 = 0x40;
+        // Post-Filter CRC Check Enable bit
+        pub(crate) const CRCEN: u8 = 0x20;
+        // Pattern Match Filter Enable bit
+        pub(crate) const PMEN: u8 = 0x10;
+        // Magic Packet Filter Enable bit
+        pub(crate) const MPEN: u8 = 0x08;
+        // Hash Table Filter Enable bit
+        pub(crate) const HTEN: u8 = 0x04;
+        // Multicast Filter Enable bit
+        pub(crate) const MCEN: u8 = 0x02;
+        // Brodcast Filter Enable bit
+        pub(crate) const BCEN: u8 = 0x01;
     }
 
-    pub(crate) const EPKTCNT: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank1), 0x19);
+    pub(crate) const EPKTCNT: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank1), 0x19);
 
     //
     // Bank 2
     //
-    pub(crate) const MACON1: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x00);
+    pub(crate) const MACON1: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x00);
     pub(crate) mod macon1 {
-        // MAC Receive Enable bit
-        pub(crate) const MARXEN: u8 = 0b00000001;
-        // Pass All Received Frames Enable bit
-        pub(crate) const PASSALL: u8 = 0b00000010;
-        // Pause Control Frames Reception Enable bit
-        pub(crate) const RXPAUS: u8 = 0b00000100;
+        pub(crate) const LOOPBK: u8 = 0x10;
         // Pause Control Frame Transmission Enable bit
-        pub(crate) const TXPAUS: u8 = 0b00001000;
+        pub(crate) const TXPAUS: u8 = 0x08;
+        // Pause Control Frames Reception Enable bit
+        pub(crate) const RXPAUS: u8 = 0x04;
+        // Pass All Received Frames Enable bit
+        pub(crate) const PASSALL: u8 = 0x02;
+        // MAC Receive Enable bit
+        pub(crate) const MARXEN: u8 = 0x01;
     }
 
-    pub(crate) const MACON3: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x02);
+    pub(crate) const MACON3: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x02);
     pub(crate) mod macon3 {
-        pub(crate) const FULLDPX: u8 = 0b00000001;
-        pub(crate) const FRMLNEN: u8 = 0b00000010;
-        pub(crate) const HFRMEN: u8 = 0b00000100;
-        pub(crate) const PHDREN: u8 = 0b00001000;
-        pub(crate) const TXCRCEN: u8 = 0b00010000;
-        pub(crate) const PADCFG0: u8 = 0b00100000;
-        pub(crate) const PADCFG1: u8 = 0b01000000;
-        pub(crate) const PADCFG2: u8 = 0b10000000;
-        pub(crate) const PADCFG_60: u8 = 0b00100000;
+        pub(crate) const PADCFG2: u8 = 0x80;
+        pub(crate) const PADCFG1: u8 = 0x40;
+        pub(crate) const PADCFG0: u8 = 0x20;
+        pub(crate) const TXCRCEN: u8 = 0x10;
+        pub(crate) const PHDRLEN: u8 = 0x08;
+        pub(crate) const HFRMLEN: u8 = 0x04;
+        pub(crate) const FRMLNEN: u8 = 0x02;
+        pub(crate) const FULDPX: u8 = 0x01;
     }
 
-    pub(crate) const MACON4: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x03);
+    pub(crate) const MACON4: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x03);
     pub(crate) mod macon4 {
-        pub(crate) const DEFER: u8 = 0b01000000;
+        pub(crate) const DEFER: u8 = 1 << 6;
     }
 
-    pub(crate) const MABBIPG: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x04);
+    pub(crate) const MABBIPG: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x04);
 
-    pub(crate) const MAIPGL: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x06);
-    pub(crate) const MAIPGH: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x07);
+    pub(crate) const MAIPGL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x06);
+    pub(crate) const MAIPGH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x07);
     pub(crate) const MAIPG: ControlRegisterU16 = ControlRegisterU16::new(MAIPGL, MAIPGH);
 
-    pub(crate) const MAMXFLL: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x0a);
-    pub(crate) const MAMXFLH: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x0b);
+    pub(crate) const MAMXFLL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x0a);
+    pub(crate) const MAMXFLH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x0b);
     pub(crate) const MAMXFL: ControlRegisterU16 = ControlRegisterU16::new(MAMXFLL, MAMXFLH);
 
-    pub(crate) const MICMD: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x12);
+    pub(crate) const MICMD: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x12);
     pub(crate) mod micmd {
-        pub(crate) const MIISCAN: u8 = 0b00000010;
-        pub(crate) const MIIRD: u8 = 0b00000001;
+        pub(crate) const MIISCAN: u8 = 0x02;
+        pub(crate) const MIIRD: u8 = 0x01;
     }
 
-    pub(crate) const MIREGADR: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x14);
+    pub(crate) const MIREGADR: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x14);
 
-    pub(crate) const MIWRL: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x16);
-    pub(crate) const MIWRH: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x17);
+    pub(crate) const MIWRL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x16);
+    pub(crate) const MIWRH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x17);
     pub(crate) const MIWR: ControlRegisterU16 = ControlRegisterU16::new(MIWRL, MIWRH);
 
-    pub(crate) const MIRDL: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x18);
-    pub(crate) const MIRDH: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank2), 0x19);
+    pub(crate) const MIRDL: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x18);
+    pub(crate) const MIRDH: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank2), 0x19);
     pub(crate) const MIRD: ControlRegisterU16 = ControlRegisterU16::new(MIRDL, MIRDH);
 
     //
     // Bank 3
     //
-    pub(crate) const MAADR5: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x00);
-    pub(crate) const MAADR6: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x01);
-    pub(crate) const MAADR3: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x02);
-    pub(crate) const MAADR4: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x03);
-    pub(crate) const MAADR1: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x04);
-    pub(crate) const MAADR2: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x05);
+    pub(crate) const MAADR5: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x00);
+    pub(crate) const MAADR6: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x01);
+    pub(crate) const MAADR3: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x02);
+    pub(crate) const MAADR4: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x03);
+    pub(crate) const MAADR1: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x04);
+    pub(crate) const MAADR2: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x05);
 
-    pub(crate) const MISTAT: ControlRegisterU8 =
-        ControlRegisterU8::new_with_sprd(Some(Bank::Bank3), 0x0a);
+    pub(crate) const MISTAT: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x0a);
     pub(crate) mod mistat {
-        pub(crate) const BUSY: u8 = 0b00000001;
-        pub(crate) const SCAN: u8 = 0b00000010;
-        pub(crate) const INVALID: u8 = 0b00000100;
+        pub(crate) const NVALID: u8 = 0x04;
+        pub(crate) const SCAN: u8 = 0x02;
+        pub(crate) const BUSY: u8 = 0x01;
     }
 
-    pub(crate) const EREVID: ControlRegisterU8 = ControlRegisterU8::new(Some(Bank::Bank3), 0x12);
+    pub(crate) const EREVID: ControlRegisterU8 = ControlRegisterU8::eth(Some(Bank::Bank3), 0x12);
 
     //
     // PHY registers
     //
     pub(crate) const PHCON1: PhyRegister = PhyRegister { addr: 0x00 };
     pub(crate) mod phcon1 {
+        pub(crate) const PRST: u16 = 0x8000;
+        pub(crate) const PLOOPBK: u16 = 0x4000;
+        pub(crate) const PPWRSV: u16 = 0x0800;
+
         // PHY Duplex Mode bit
         // 1 = Full-Duplex mode
         // 0 = Half-Duplex mode
         pub(crate) const PDPXMD: u16 = 0x0100;
-        pub(crate) const PHCON1_PPWRSV: u16 = 0x0800;
-        pub(crate) const PHCON1_PLOOPBK: u16 = 0x4000;
     }
 
     pub(crate) const PHSTAT1: PhyRegister = PhyRegister { addr: 0x01 };
-    pub(crate) const PHHID1: PhyRegister = PhyRegister { addr: 0x02 };
-    pub(crate) const PHHID2: PhyRegister = PhyRegister { addr: 0x03 };
+    pub(crate) mod phstat1 {
+        pub(crate) const PFDPX: u16 = 0x1000;
+        pub(crate) const PHDPX: u16 = 0x0800;
+        pub(crate) const LLSTAT: u16 = 0x0004;
+        pub(crate) const JBSTAT: u16 = 0x0002;
+    }
+
+    pub(crate) const PHID1: PhyRegister = PhyRegister { addr: 0x02 };
+    pub(crate) const PHID2: PhyRegister = PhyRegister { addr: 0x03 };
+
     pub(crate) const PHCON2: PhyRegister = PhyRegister { addr: 0x10 };
+    pub(crate) mod phcon2 {
+        pub(crate) const FRCLINK: u16 = 0x4000;
+        pub(crate) const TXDIS: u16 = 0x2000;
+        pub(crate) const JABBER: u16 = 0x0400;
+        pub(crate) const HDLDIS: u16 = 0x0100;
+    }
 
     pub(crate) const PHSTAT2: PhyRegister = PhyRegister { addr: 0x11 };
     pub(crate) mod phstat2 {
@@ -379,5 +386,52 @@ pub(crate) mod register {
     }
 
     pub(crate) const PHIR: PhyRegister = PhyRegister { addr: 0x13 };
+    pub(crate) mod phir {
+        pub(crate) const PLNKIF: u16 = 1 << 4;
+        pub(crate) const PGEIF: u16 = 1 << 1;
+    }
     pub(crate) const PHLCON: PhyRegister = PhyRegister { addr: 0x14 };
+}
+
+#[repr(packed)]
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct RxStatusVector {
+    pub(crate) next_ptr: u16,
+    pub(crate) byte_count: u16,
+    pub(crate) status: u16,
+}
+
+impl RxStatusVector {
+    pub(crate) const fn size() -> usize {
+        core::mem::size_of::<Self>()
+    }
+
+    pub(crate) fn new(data: &[u8; 6]) -> Self {
+        Self {
+            next_ptr: ((data[1] as u16) << 8) | data[0] as u16,
+            byte_count: ((data[3] as u16) << 8) | data[2] as u16,
+            status: ((data[5] as u16) << 8) | data[4] as u16,
+        }
+    }
+
+    pub(crate) fn status(&self, mask: RsvMask) -> bool {
+        self.status & mask as u16 != 0
+    }
+}
+
+#[repr(u16)]
+pub(crate) enum RsvMask {
+    LongDropEvent = 1,
+    CarrierEvent = 1 << 2,
+    CrcError = 1 << 4,
+    LengthCheckError = 1 << 5,
+    LengthOutOfRange = 1 << 6,
+    RxOk = 1 << 7,
+    RxMulticast = 1 << 8,
+    RxBroadcast = 1 << 9,
+    DribbleNibble = 1 << 10,
+    RxControlFrame = 1 << 11,
+    RxPauseFrame = 1 << 12,
+    RxUnknownOpcode = 1 << 13,
+    RxTypeVlan = 1 << 14,
 }
