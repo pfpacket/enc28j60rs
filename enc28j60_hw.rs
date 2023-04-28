@@ -393,6 +393,29 @@ pub(crate) mod register {
     pub(crate) const PHLCON: PhyRegister = PhyRegister { addr: 0x14 };
 }
 
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct TxStatusVector {
+    pub(crate) byte_count: u16,
+    pub(crate) status1: u16,
+    pub(crate) total_bytes_transmitted: u16,
+    pub(crate) status2: u8,
+}
+
+impl TxStatusVector {
+    pub(crate) const fn size() -> usize {
+        7
+    }
+
+    pub(crate) fn new(data: &[u8; Self::size()]) -> TxStatusVector {
+        TxStatusVector {
+            byte_count: ((data[1] as u16) << 8) | data[0] as u16,
+            status1: ((data[3] as u16) << 8) | data[2] as u16,
+            total_bytes_transmitted: ((data[5] as u16) << 8) | data[4] as u16,
+            status2: data[6],
+        }
+    }
+}
+
 #[repr(packed)]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct RxStatusVector {
@@ -406,7 +429,7 @@ impl RxStatusVector {
         core::mem::size_of::<Self>()
     }
 
-    pub(crate) fn new(data: &[u8; 6]) -> Self {
+    pub(crate) fn new(data: &[u8; Self::size()]) -> Self {
         Self {
             next_ptr: ((data[1] as u16) << 8) | data[0] as u16,
             byte_count: ((data[3] as u16) << 8) | data[2] as u16,
@@ -414,13 +437,13 @@ impl RxStatusVector {
         }
     }
 
-    pub(crate) fn status(&self, mask: RsvMask) -> bool {
+    pub(crate) fn status(&self, mask: RsvStatus) -> bool {
         self.status & mask as u16 != 0
     }
 }
 
 #[repr(u16)]
-pub(crate) enum RsvMask {
+pub(crate) enum RsvStatus {
     LongDropEvent = 1,
     CarrierEvent = 1 << 2,
     CrcError = 1 << 4,
